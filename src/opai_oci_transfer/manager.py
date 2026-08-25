@@ -7,7 +7,6 @@ import builtins
 import inspect
 import json
 import os
-import random
 import secrets
 import shutil
 import tempfile
@@ -105,6 +104,7 @@ class CopyManager:
         self._worker_id = f"{os.getpid()}-{uuid.uuid4().hex}"
         self._tasks: list[asyncio.Task[None]] = []
         self._wake = asyncio.Event()
+        self._stop = asyncio.Event()
         self._closing = False
         self._process: asyncio.subprocess.Process | None = None
         self._runtime: Path | None = None
@@ -123,6 +123,7 @@ class CopyManager:
         if self._tasks:
             return
         self._closing = False
+        self._stop.clear()
         await self._start_service()
         self._tasks = [
             asyncio.create_task(self._worker(i), name=f"oci-copy-{i}") for i in range(self.workers)
@@ -130,7 +131,16 @@ class CopyManager:
 
     async def close(self) -> None:
         self._closing = True
+        self._stop.set()
         self._wake.set()
+        shutdown_errors: list[OCITransferError] = []
+        for operation in tuple(self._operations.values()):
+            try:
+                await self.client.cancel(operation)
+            except OCITransferError as exc:
+                # Complete all local cleanup, then preserve the actionable
+                # service failure for the caller of close().
+                shutdown_errors.append(exc)
         for task in self._tasks:
             task.cancel()
         if self._tasks:
@@ -152,6 +162,12 @@ class CopyManager:
             self._runtime = None
         # Allow a manager to be restarted after close; _attach creates a fresh pool.
         self.client._closed = False
+        if shutdown_errors:
+            details = "; ".join(safe_error(error) for error in shutdown_errors)
+            raise OCITransferError(
+                f"failed to cancel active operations during shutdown: {details}",
+                code="protocol_error",
+            )
 
     async def __aenter__(self) -> CopyManager:
         await self.start()
@@ -226,6 +242,10 @@ class CopyManager:
         job = await asyncio.to_thread(self.store.retry, job_id)
         self._wake.set()
         return job
+
+    async def dismiss(self, job_id: str) -> None:
+        """Delete a terminal copy job and its durable history."""
+        await asyncio.to_thread(self.store.dismiss, job_id)
 
     async def wait(
         self,
@@ -304,7 +324,7 @@ class CopyManager:
 
     async def _worker(self, index: int) -> None:
         worker = f"{self._worker_id}-{index}"
-        while not self._closing:
+        while not self._stop.is_set():
             claim = await asyncio.to_thread(self.store.claim, worker, self.lease_seconds)
             if claim is None:
                 self._wake.clear()
@@ -317,6 +337,7 @@ class CopyManager:
             try:
                 await self._execute(job, token)
             except asyncio.CancelledError:
+                await asyncio.to_thread(self.store.release_claim, job.id, token)
                 raise
             except Exception as exc:
                 detail = safe_error(exc)
@@ -423,17 +444,21 @@ class CopyManager:
     async def _record_failure(self, job_id: str, token: str, exc: OCITransferError) -> None:
         details = await asyncio.to_thread(self.store.details, job_id)
         retryable = exc.retryable
+        original_detail = safe_error(exc)
         integrity_failure = exc.code == "digest_mismatch"
         if integrity_failure and details["integrity_failures"] >= self.integrity_retries:
-            detail = safe_error(exc)
+            detail = original_detail
             retryable = False
             exc = OCITransferError(
                 f"Copy failed repeated integrity verification: {detail}",
                 code="integrity_retries_exhausted",
             )
         last = datetime.fromisoformat(details["last_progress_at"])
-        if (datetime.now(last.tzinfo) - last).total_seconds() >= self.no_progress_timeout:
-            detail = safe_error(exc)
+        if (
+            retryable
+            and (datetime.now(last.tzinfo) - last).total_seconds() >= self.no_progress_timeout
+        ):
+            detail = original_detail
             retryable, exc = (
                 False,
                 OCITransferError(
@@ -444,7 +469,7 @@ class CopyManager:
         if self.overall_timeout and details["started_at"]:
             started = datetime.fromisoformat(details["started_at"])
             if (datetime.now(started.tzinfo) - started).total_seconds() >= self.overall_timeout:
-                detail = safe_error(exc)
+                detail = original_detail
                 retryable, exc = (
                     False,
                     OCITransferError(
@@ -452,14 +477,14 @@ class CopyManager:
                         code="overall_timeout",
                     ),
                 )
-        delay = (
-            exc.retry_after
-            if exc.retry_after is not None
-            else random.uniform(  # noqa: S311 - jitter is not security-sensitive
-                0,
-                min(self.max_backoff, self.initial_backoff * 2 ** details["consecutive_failures"]),
+        if exc.retry_after is not None:
+            delay = min(self.max_backoff, max(0.0, exc.retry_after))
+        else:
+            cap = min(
+                self.max_backoff,
+                self.initial_backoff * 2 ** min(details["consecutive_failures"], 16),
             )
-        )
+            delay = secrets.randbelow(max(1, int(cap * 1000) + 1)) / 1000
         await asyncio.to_thread(
             self.store.fail_or_retry,
             job_id,

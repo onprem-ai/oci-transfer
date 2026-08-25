@@ -56,6 +56,15 @@ async def test_start_missing_binary_and_context_methods(
 
 
 @pytest.mark.asyncio
+async def test_close_preserves_service_cancel_failure(tmp_path: Path) -> None:
+    manager = CopyManager(tmp_path / "close.sqlite", AsyncOCIClient())
+    manager._operations["job"] = "operation"
+    manager.client.cancel = AsyncMock(side_effect=OCITransferError("socket disappeared"))  # type: ignore[method-assign]
+    with pytest.raises(OCITransferError, match="socket disappeared"):
+        await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_start_real_fake_service_and_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

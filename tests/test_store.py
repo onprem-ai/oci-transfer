@@ -109,7 +109,31 @@ def test_failure_retry_cancel_release_and_prune(tmp_path: Path) -> None:
 def test_release_and_safe_error(tmp_path: Path) -> None:
     db = store(tmp_path)
     job = db.enqueue(values())
-    db.claim("worker", 60)
-    db.release("worker")
+    claimed = db.claim("manager-0", 60)
+    assert claimed
+    db.release("manager")
     assert db.get(job.id).state == "queued"
     assert "secret" not in safe_error("https://host/path token=secret")
+
+
+def test_dismiss_terminal_job_and_reject_active(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    active = db.enqueue(values())
+    with pytest.raises(JobConflictError, match="terminal"):
+        db.dismiss(active.id)
+    db.cancel(active.id)
+    db.dismiss(active.id)
+    with pytest.raises(JobNotFoundError):
+        db.get(active.id)
+    with pytest.raises(JobNotFoundError):
+        db.dismiss("missing")
+
+
+def test_release_claim_is_fenced(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    job = db.enqueue(values())
+    claimed = db.claim("manager-0", 60)
+    assert claimed
+    assert not db.release_claim(job.id, "wrong-token")
+    assert db.release_claim(job.id, claimed[1])
+    assert db.get(job.id).state == "queued"

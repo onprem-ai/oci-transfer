@@ -187,6 +187,8 @@ class CopyJob:
     bytes_per_second: int | None
     run_count: int
     consecutive_failures: int
+    next_retry_at: str | None
+    last_progress_at: str
     snapshot_digest: str | None
     error_code: str | None
     error_message: str | None
@@ -194,6 +196,9 @@ class CopyJob:
     updated_at: str
     started_at: str | None
     completed_at: str | None
+    worker_id: str | None
+    lease_expires_at: str | None
+    heartbeat_at: str | None
 
     @property
     def percent(self) -> float | None:

@@ -51,6 +51,8 @@ def test_model_edge_cases() -> None:
         bytes_per_second=None,
         run_count=0,
         consecutive_failures=0,
+        next_retry_at=None,
+        last_progress_at="x",
         snapshot_digest=None,
         error_code=None,
         error_message=None,
@@ -58,6 +60,9 @@ def test_model_edge_cases() -> None:
         updated_at="x",
         started_at=None,
         completed_at=None,
+        worker_id=None,
+        lease_expires_at=None,
+        heartbeat_at=None,
     )
     assert CopyJob(**base).percent is None
     assert CopyJob(**(base | {"expected_bytes": 0})).percent == 0
@@ -158,6 +163,25 @@ async def test_manager_timeout_failure_paths(tmp_path: Path) -> None:
         )
     await manager._record_failure(job.id, token, OCITransferError("temp", retryable=True))
     assert (await manager.get(job.id)).error_code == "overall_timeout"
+
+
+@pytest.mark.asyncio
+async def test_old_permanent_failure_is_not_mislabeled_no_progress(tmp_path: Path) -> None:
+    manager = CopyManager(tmp_path / "permanent.sqlite", AsyncOCIClient())
+    job = await manager.enqueue("a.example/x:v1", "b.example/x:v1")
+    claimed, token = await asyncio.to_thread(manager.store.claim, "w", 60) or (None, None)
+    assert claimed and token
+    old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    with manager.store._connect() as db:
+        db.execute("UPDATE copy_jobs SET last_progress_at=? WHERE id=?", (old, job.id))
+    await manager._record_failure(
+        job.id,
+        token,
+        OCITransferError("manifest has no config", code="manifest_invalid", retryable=False),
+    )
+    result = await manager.get(job.id)
+    assert result.error_code == "manifest_invalid"
+    assert result.error_message == "manifest has no config"
 
 
 @pytest.mark.asyncio

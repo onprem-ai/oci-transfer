@@ -29,7 +29,7 @@ TERMINAL = frozenset({"completed", "failed", "cancelled"})
 ACTIVE = frozenset(
     {"queued", "planning", "copying", "retry_wait", "publishing", "verifying", "cancel_requested"}
 )
-JOB_COLS = "id,source,resolved_source,destination,state,completed_bytes,expected_bytes,network_bytes,completed_blobs,total_blobs,bytes_per_second,run_count,consecutive_failures,snapshot_digest,error_code,error_message,created_at,updated_at,started_at,completed_at"
+JOB_COLS = "id,source,resolved_source,destination,state,completed_bytes,expected_bytes,network_bytes,completed_blobs,total_blobs,bytes_per_second,run_count,consecutive_failures,next_retry_at,last_progress_at,snapshot_digest,error_code,error_message,created_at,updated_at,started_at,completed_at,worker_id,lease_expires_at,heartbeat_at"
 
 
 def now() -> datetime:
@@ -465,6 +465,24 @@ class SQLiteQueueStore:
             )
         return self.get(job_id)
 
+    def dismiss(self, job_id: str) -> None:
+        """Delete a terminal job and all cascading transfer history."""
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT state FROM copy_jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            if row["state"] not in TERMINAL:
+                raise JobConflictError("only terminal copy jobs can be dismissed")
+            db.execute("DELETE FROM copy_jobs WHERE id=?", (job_id,))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def cancellation_requested(self, job_id: str, token: str) -> bool:
         with closing(self._connect()) as db:
             row = db.execute(
@@ -472,11 +490,23 @@ class SQLiteQueueStore:
             ).fetchone()
         return row is None or row["claim_token"] != token or row["state"] == "cancel_requested"
 
-    def release(self, worker: str) -> None:
+    def release_claim(self, job_id: str, token: str) -> bool:
+        """Release one interrupted claim without representing user cancellation."""
+        current = timestamp()
+        with closing(self._connect()) as db, db:
+            cursor = db.execute(
+                "UPDATE copy_jobs SET state=CASE WHEN snapshot_json IS NULL THEN 'queued' ELSE 'retry_wait' END,next_retry_at=?,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? WHERE id=? AND claim_token=? AND state IN ('planning','copying','publishing','verifying')",
+                (current, current, job_id, token),
+            )
+        return cursor.rowcount == 1
+
+    def release(self, worker_prefix: str) -> None:
+        """Defensively release all claims owned by this manager process."""
+        current = timestamp()
         with closing(self._connect()) as db, db:
             db.execute(
-                "UPDATE copy_jobs SET state=CASE WHEN snapshot_json IS NULL THEN 'queued' ELSE 'retry_wait' END,next_retry_at=?,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL,updated_at=? WHERE worker_id=? AND state IN ('planning','copying','publishing','verifying')",
-                (timestamp(), timestamp(), worker),
+                "UPDATE copy_jobs SET state=CASE WHEN snapshot_json IS NULL THEN 'queued' ELSE 'retry_wait' END,next_retry_at=?,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? WHERE (worker_id=? OR worker_id LIKE ?) AND state IN ('planning','copying','publishing','verifying')",
+                (current, current, worker_prefix, worker_prefix + "-%"),
             )
 
     def prune(

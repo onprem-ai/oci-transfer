@@ -46,7 +46,9 @@ async def test_queue_lifecycle(tmp_path: Path) -> None:
     assert (await manager.cancel(job.id)).state == "cancelled"
     assert (await manager.wait(job.id)).state == "cancelled"
     assert (await manager.prune(states=("cancelled",), dry_run=True)).jobs == 1
-    assert (await manager.prune(states=("cancelled",))).jobs == 1
+    await manager.dismiss(job.id)
+    with pytest.raises(KeyError):
+        await manager.get(job.id)
 
 
 def test_static_provider_is_async() -> None:
