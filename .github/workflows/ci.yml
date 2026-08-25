@@ -1,38 +1,54 @@
 name: ci
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
 jobs:
   python:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.11', '3.12', '3.13']
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-        with: {python-version: '${{ matrix.python }}'}
+        with:
+          python-version: ${{ matrix.python }}
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run mypy --strict src
       - run: uv run pytest --cov=opai_oci_transfer --cov-branch --cov-fail-under=90
+
   go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: {go-version: '1.25.13', cache-dependency-path: go/go.sum}
+        with:
+          go-version: "1.25.13"
+          cache-dependency-path: go/go.sum
       - run: cd go && go test ./... && go test -race ./... && go vet ./...
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest && cd go && govulncheck ./...
+
   wheels:
     runs-on: ubuntu-latest
-    strategy: {matrix: {arch: [amd64, arm64]}}
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: {go-version: '1.25.13', cache-dependency-path: go/go.sum}
+        with:
+          go-version: "1.25.13"
+          cache-dependency-path: go/go.sum
       - uses: astral-sh/setup-uv@v6
-        with: {python-version: '3.11'}
+        with:
+          python-version: "3.11"
       - run: ./scripts/build-wheel.sh ${{ matrix.arch }}
-      - run: ./scripts/test-wheel.sh $(ls dist/*.whl)
+      - run: ./scripts/test-wheel.sh "$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
         if: matrix.arch == 'amd64'
       - uses: actions/upload-artifact@v4
-        with: {name: opai-oci-transfer-wheel-linux-${{ matrix.arch }}, path: dist/*.whl}
+        with:
+          name: opai-oci-transfer-wheel-linux-${{ matrix.arch }}
+          path: dist/*.whl
