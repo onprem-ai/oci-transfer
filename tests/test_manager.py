@@ -90,11 +90,13 @@ async def test_worker_retries_transient_failure(tmp_path: Path) -> None:
     value = await manager(tmp_path, client, initial_backoff=0.001, max_backoff=0.001)
     job = await value.enqueue("a.example/team/app:v1", "b.example/team/app:v1")
     await value.start()
-    for _ in range(200):
-        errors = await value.errors(job.id)
-        if errors:
-            break
-        await asyncio.sleep(0.001)
+
+    async def first_error() -> list[Any]:
+        while not (errors := await value.errors(job.id)):
+            await asyncio.sleep(0.005)
+        return errors
+
+    errors = await asyncio.wait_for(first_error(), 2)
     await value.close()
     assert (await value.get(job.id)).state in {"retry_wait", "copying"}
     assert errors[0].retryable
