@@ -24,7 +24,7 @@ from opai_oci_transfer.models import (
     RegistryCredentials,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "AnonymousCredentialProvider",
     "AsyncOCIClient",
