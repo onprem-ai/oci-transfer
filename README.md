@@ -1,5 +1,8 @@
 # opai-oci-transfer
 
+![Tests](https://img.shields.io/endpoint?style=for-the-badge&url=https://gist.githubusercontent.com/tomas-polach/a86fb4ad5e2ecb21c0a53493264f8e4c/raw/oci-transfer-tests-status.json)
+![Coverage](https://img.shields.io/endpoint?style=for-the-badge&url=https://gist.githubusercontent.com/tomas-polach/a86fb4ad5e2ecb21c0a53493264f8e4c/raw/oci-transfer-coverage.json)
+
 Durable, observable, daemonless OCI image copies between registries. The public API is async-only; a private bundled Go service performs registry operations with regclient.
 
 ```python

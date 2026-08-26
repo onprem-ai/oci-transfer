@@ -3,6 +3,10 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   python:
@@ -10,6 +14,8 @@ jobs:
     strategy:
       matrix:
         python: ["3.11", "3.12", "3.13"]
+    env:
+      HAS_GIST_SECRET: ${{ secrets.GIST_SECRET != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -18,7 +24,25 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run mypy --strict src
-      - run: uv run pytest --cov=opai_oci_transfer --cov-branch --cov-fail-under=90
+      - run: uv run pytest --cov=opai_oci_transfer --cov-branch --cov-report=json:coverage.json --cov-fail-under=90
+      - name: Extract coverage percentage
+        if: matrix.python == '3.11'
+        id: coverage
+        run: |
+          percentage=$(python -c 'import json; print(round(json.load(open("coverage.json"))["totals"]["percent_covered"]))')
+          echo "percentage=$percentage" >> "$GITHUB_OUTPUT"
+      - name: Update coverage badge
+        if: matrix.python == '3.11' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && env.HAS_GIST_SECRET == 'true'
+        uses: schneegans/dynamic-badges-action@0e50b8bad39e7e1afd3e4e9c2b7dd145fad07501 # v1.8.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: a86fb4ad5e2ecb21c0a53493264f8e4c
+          filename: oci-transfer-coverage.json
+          label: Coverage
+          message: ${{ steps.coverage.outputs.percentage }}%
+          valColorRange: ${{ steps.coverage.outputs.percentage }}
+          minColorRange: 50
+          maxColorRange: 100
 
   go:
     runs-on: ubuntu-latest
