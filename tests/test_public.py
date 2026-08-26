@@ -29,12 +29,17 @@ def test_snapshot_is_deterministic() -> None:
 
 def test_reference_and_platform_validation() -> None:
     assert parse_reference("registry.example/team/app:v1") == ("registry.example", "team/app")
+    assert parse_reference(
+        "registry.example/team/app:v1@sha256:" + "a" * 64
+    ) == ("registry.example", "team/app")
     assert normalize_platforms(("linux/arm64", "linux/amd64")) == (
         "linux/amd64",
         "linux/arm64",
     )
     with pytest.raises(ValueError):
         parse_reference("ubuntu:latest")
+    with pytest.raises(ValueError):
+        parse_reference("registry.example/team/app")
 
 
 @pytest.mark.asyncio

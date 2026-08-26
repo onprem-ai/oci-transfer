@@ -180,6 +180,25 @@ func decode(w http.ResponseWriter, r *http.Request, out any) bool {
 	}
 	return true
 }
+func parseReference(value string) (ref.Ref, error) {
+	parsed, err := ref.New(value)
+	if err != nil || parsed.Registry == "" || parsed.Repository == "" || (parsed.Tag == "" && parsed.Digest == "") {
+		return ref.Ref{}, fmt.Errorf("invalid OCI reference")
+	}
+	return parsed, nil
+}
+
+func parseExplicitReference(value string) (ref.Ref, error) {
+	// ref.New supplies :latest when no tag or digest is present. The transfer
+	// protocol requires callers to make that mutable choice explicit.
+	lastSlash := strings.LastIndex(value, "/")
+	lastColon := strings.LastIndex(value, ":")
+	if !strings.Contains(value, "@") && lastColon <= lastSlash {
+		return ref.Ref{}, fmt.Errorf("OCI reference must include a tag or digest")
+	}
+	return parseReference(value)
+}
+
 func hosts(source, destination ref.Ref, src, dst *credentials, requests int, insecure map[string]bool, certs map[string]string) []config.Host {
 	result := []config.Host{}
 	add := func(r ref.Ref, c *credentials) {
@@ -210,24 +229,39 @@ func (s *server) plan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, event{"code": "protocol_error", "message": "unsupported protocol"})
 		return
 	}
-	src, e := ref.New(q.Source)
-	if e != nil || src.Registry == "" || src.Repository == "" {
+	src, e := parseExplicitReference(q.Source)
+	if e != nil {
 		writeJSON(w, 400, event{"code": "invalid_reference", "message": "invalid source"})
 		return
 	}
-	dst, e := ref.New(q.Destination)
-	if e != nil || dst.Registry == "" {
+	dst, e := parseExplicitReference(q.Destination)
+	if e != nil {
 		writeJSON(w, 400, event{"code": "invalid_reference", "message": "invalid destination"})
 		return
 	}
 	rc := regclient.New(regclient.WithConfigHost(hosts(src, dst, q.SourceCredentials, q.DestinationCredentials, s.requests, s.insecure, s.certs)...))
 	defer rc.Close(r.Context(), src)
-	m, e := rc.ManifestGet(r.Context(), src)
+	// In a combined source reference, the digest is authoritative. The tag is
+	// descriptive metadata and may have moved or disappeared since the digest
+	// was pinned, so registry reads never depend on it.
+	sourceByDigest := src
+	if src.Digest != "" {
+		sourceByDigest = src.SetDigest(src.Digest)
+	}
+	m, e := rc.ManifestGet(r.Context(), sourceByDigest)
 	if e != nil {
 		serviceError(w, e)
 		return
 	}
 	d := m.GetDescriptor()
+	if src.Tag != "" && src.Digest != "" && d.Digest.String() != src.Digest {
+		writeJSON(w, http.StatusConflict, event{"code": "digest_mismatch", "message": "source digest does not match the supplied digest", "retryable": false})
+		return
+	}
+	if dst.Digest != "" && dst.Digest != d.Digest.String() {
+		writeJSON(w, http.StatusConflict, event{"code": "digest_mismatch", "message": "destination digest does not match source content", "retryable": false})
+		return
+	}
 	resolved := src.SetDigest(d.Digest.String())
 	manifests := []manifestRecord{{Digest: d.Digest.String(), MediaType: d.MediaType, Size: d.Size, Kind: "root"}}
 	blobs := map[string]descriptor{}
@@ -373,22 +407,39 @@ func (s *server) copy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, event{"code": "protocol_error", "message": "invalid replacement policy"})
 		return
 	}
-	src, e := ref.New(q.Snapshot.ResolvedSource)
+	src, e := parseReference(q.Snapshot.ResolvedSource)
 	if e != nil {
 		serviceError(w, e)
 		return
 	}
-	dst, e := ref.New(q.Snapshot.Destination)
+	dst, e := parseReference(q.Snapshot.Destination)
 	if e != nil {
 		serviceError(w, e)
 		return
 	}
-	rc := regclient.New(regclient.WithConfigHost(hosts(src, dst, q.SourceCredentials, q.DestinationCredentials, s.requests, s.insecure, s.certs)...))
-	defer rc.Close(ctx, src)
-	if existing, headErr := rc.ManifestHead(ctx, dst, regclient.WithManifestRequireDigest()); headErr == nil {
+	if src.Digest == "" || src.Digest != q.Snapshot.RootDigest {
+		writeJSON(w, http.StatusConflict, event{"code": "digest_mismatch", "message": "resolved source does not match planned digest", "retryable": false})
+		return
+	}
+	if dst.Digest != "" && dst.Digest != q.Snapshot.RootDigest {
+		writeJSON(w, http.StatusConflict, event{"code": "digest_mismatch", "message": "destination digest does not match planned content", "retryable": false})
+		return
+	}
+	// Registry manifest endpoints accept either a tag or digest, not the
+	// combined client-facing form. Copy by the immutable source digest and,
+	// when supplied, publish the destination under its retained tag.
+	sourceByDigest := src.SetDigest(q.Snapshot.RootDigest)
+	destinationByDigest := dst.SetDigest(q.Snapshot.RootDigest)
+	destinationPublish := destinationByDigest
+	if dst.Tag != "" {
+		destinationPublish = dst.SetTag(dst.Tag)
+	}
+	rc := regclient.New(regclient.WithConfigHost(hosts(sourceByDigest, destinationPublish, q.SourceCredentials, q.DestinationCredentials, s.requests, s.insecure, s.certs)...))
+	defer rc.Close(ctx, sourceByDigest)
+	if existing, headErr := rc.ManifestHead(ctx, destinationPublish, regclient.WithManifestRequireDigest()); headErr == nil {
 		existingDigest := existing.GetDescriptor().Digest.String()
 		if existingDigest != q.Snapshot.RootDigest && q.Snapshot.ReplacementPolicy == "no_clobber" {
-			writeJSON(w, http.StatusConflict, event{"code": "destination_conflict", "message": "destination already references different content", "retryable": false})
+			writeJSON(w, http.StatusConflict, event{"code": "destination_conflict", "message": "destination tag already references different content", "retryable": false})
 			return
 		}
 	}
@@ -423,12 +474,12 @@ func (s *server) copy(w http.ResponseWriter, r *http.Request) {
 	} else if len(q.Snapshot.Platforms) > 1 {
 		opts = append(opts, regclient.ImageWithPlatforms(q.Snapshot.Platforms))
 	}
-	if e = rc.ImageCopy(ctx, src, dst, opts...); e != nil {
+	if e = rc.ImageCopy(ctx, sourceByDigest, destinationPublish, opts...); e != nil {
 		emit(classify(e))
 		return
 	}
 	emit(event{"type": "phase", "phase": "verifying"})
-	m, e := rc.ManifestHead(ctx, dst, regclient.WithManifestRequireDigest())
+	m, e := rc.ManifestHead(ctx, destinationByDigest, regclient.WithManifestRequireDigest())
 	if e != nil {
 		emit(classify(e))
 		return
@@ -436,6 +487,17 @@ func (s *server) copy(w http.ResponseWriter, r *http.Request) {
 	if m.GetDescriptor().Digest.String() != q.Snapshot.RootDigest {
 		emit(event{"type": "failed", "code": "digest_mismatch", "message": "destination digest mismatch", "retryable": false})
 		return
+	}
+	if dst.Tag != "" {
+		tagged, tagErr := rc.ManifestHead(ctx, dst.SetTag(dst.Tag), regclient.WithManifestRequireDigest())
+		if tagErr != nil {
+			emit(classify(tagErr))
+			return
+		}
+		if tagged.GetDescriptor().Digest.String() != q.Snapshot.RootDigest {
+			emit(event{"type": "failed", "code": "digest_mismatch", "message": "destination tag does not resolve to copied digest", "retryable": false})
+			return
+		}
 	}
 	emit(event{"type": "completed", "digest": q.Snapshot.RootDigest})
 }

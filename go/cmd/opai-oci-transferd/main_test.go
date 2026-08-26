@@ -56,6 +56,31 @@ func TestHosts(t *testing.T) {
 	}
 }
 
+func TestParseCombinedReference(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	r, err := parseReference("registry.example/team/app:v1@" + digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Tag != "v1" || r.Digest != digest {
+		t.Fatalf("combined reference was not preserved: %#v", r)
+	}
+	if r.SetDigest(r.Digest).CommonName() != "registry.example/team/app@"+digest {
+		t.Fatal("digest-authoritative reference was not derived")
+	}
+	if r.SetTag(r.Tag).CommonName() != "registry.example/team/app:v1" {
+		t.Fatal("tag publication reference was not derived")
+	}
+}
+
+func TestParseExplicitReferenceRejectsImplicitLatest(t *testing.T) {
+	t.Parallel()
+	if _, err := parseExplicitReference("registry.example/team/app"); err == nil {
+		t.Fatal("reference without a tag or digest was accepted")
+	}
+}
+
 func TestHealthAndDecode(t *testing.T) {
 	t.Parallel()
 	s := &server{}

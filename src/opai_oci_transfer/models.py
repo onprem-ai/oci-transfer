@@ -27,11 +27,14 @@ TerminalState = Literal["completed", "failed", "cancelled"]
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PROVIDER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-# Deliberately requires registry/repository and a tag or digest. Go validates again.
+# Requires registry/repository and accepts tag-only, digest-only, or the common
+# client-facing tag+digest form. The transfer engine treats the digest as
+# authoritative while retaining the tag for destination publication.
 _REFERENCE = re.compile(
     r"^(?P<registry>localhost|(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?)"
     r"/(?P<repository>[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*)"
-    r"(?:(?P<tag>:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|@(?P<digest>sha256:[0-9a-f]{64}))$"
+    r"(?::(?P<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}))?"
+    r"(?:@(?P<digest>sha256:[0-9a-f]{64}))?$"
 )
 
 
@@ -262,7 +265,7 @@ def parse_reference(value: str) -> tuple[str, str]:
     if not isinstance(value, str) or len(value) > 512 or any(ord(c) < 33 for c in value):
         raise ValueError("invalid fully qualified OCI reference")
     match = _REFERENCE.fullmatch(value)
-    if not match:
+    if not match or (match.group("tag") is None and match.group("digest") is None):
         raise ValueError("OCI reference must be fully qualified and include a tag or sha256 digest")
     port = match.group("registry").rpartition(":")[2]
     if port.isdigit() and not 1 <= int(port) <= 65535:

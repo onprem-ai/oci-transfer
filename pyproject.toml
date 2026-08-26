@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opai-oci-transfer"
-version = "0.1.1"
+version = "0.2.0"
 description = "Durable asynchronous OCI image transfers between registries"
 readme = "README.md"
 requires-python = ">=3.11"

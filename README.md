@@ -10,8 +10,8 @@ client = AsyncOCIClient()
 manager = CopyManager(Path("copies.sqlite"), client)
 async with manager:
     job = await manager.enqueue(
-        "registry-a.example/team/image:v1",
-        "registry-b.example/team/image:v1",
+        "registry-a.example/team/image:v1@sha256:<64-hex-digest>",
+        "registry-b.example/team/image:v1@sha256:<64-hex-digest>",
     )
     completed = await manager.wait(job.id)
     # Optional explicit removal of terminal durable history.
@@ -19,7 +19,7 @@ async with manager:
 await client.aclose()
 ```
 
-`enqueue` only validates and persists local state. Workers resolve the source tag to an immutable digest, persist a deterministic snapshot, copy its content, and verify publication. SQLite must be on local storage. Credentials are provided through explicit async providers and are never persisted.
+`enqueue` only validates and persists local state. References may be tag-only, digest-only, or `tag@digest`. For a combined reference, the digest is authoritative while the tag is retained as descriptive metadata for destination publication and discovery. Workers persist a deterministic snapshot, copy immutable content, and verify both the destination digest and tag. SQLite must be on local storage. Credentials are provided through explicit async providers and are never persisted.
 
 The wheel must contain `opai_oci_transfer/_bin/opai-oci-transferd`. For development tests only, `OPAI_OCI_TRANSFER_TEST_BINARY` may point to a locally built service.
 

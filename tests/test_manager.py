@@ -15,11 +15,15 @@ class FakeClient(AsyncOCIClient):
         super().__init__()
         self.failure = failure
         self.cancelled: list[str] = []
+        self.plan_payloads: list[dict[str, Any]] = []
+        self.copy_payloads: list[dict[str, Any]] = []
 
     async def plan(self, payload: dict[str, Any]) -> ImageSnapshot:
+        self.plan_payloads.append(payload)
+        source_base = payload["source"].split(":v1", 1)[0]
         return ImageSnapshot.create(
             source=payload["source"],
-            resolved_source=payload["source"].split(":v1")[0] + "@sha256:" + "a" * 64,
+            resolved_source=source_base + "@sha256:" + "a" * 64,
             destination=payload["destination"],
             root_digest="sha256:" + "a" * 64,
             root_media_type="manifest",
@@ -30,7 +34,8 @@ class FakeClient(AsyncOCIClient):
     async def copy(
         self, operation_id: str, payload: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
-        del operation_id, payload
+        del operation_id
+        self.copy_payloads.append(payload)
         if self.failure:
             raise self.failure
         yield {"type": "phase", "phase": "copying"}
@@ -70,6 +75,27 @@ async def test_worker_completes_and_wait_updates(tmp_path: Path) -> None:
     assert result.snapshot_digest and result.completed_bytes == 5
     assert result.percent == 100
     assert seen[-1] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_combined_references_in_protocol_payloads(tmp_path: Path) -> None:
+    client = FakeClient()
+    value = await manager(tmp_path, client)
+    digest = "sha256:" + "a" * 64
+    source = f"a.example/team/app:v1@{digest}"
+    destination = f"b.example/team/app:v1@{digest}"
+    job = await value.enqueue(source, destination)
+
+    async with value:
+        result = await asyncio.wait_for(value.wait(job.id), 2)
+
+    assert result.state == "completed"
+    assert result.source == source
+    assert result.destination == destination
+    assert client.plan_payloads[0]["source"] == source
+    assert client.plan_payloads[0]["destination"] == destination
+    assert client.copy_payloads[0]["snapshot"]["source"] == source
+    assert client.copy_payloads[0]["snapshot"]["destination"] == destination
 
 
 @pytest.mark.asyncio

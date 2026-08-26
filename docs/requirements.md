@@ -227,21 +227,28 @@ events are never dropped. HTTP access logs and request-body logging are disabled
 A source and destination are explicit fully qualified references. Any supported
 source registry may be paired with any supported destination registry, including
 anonymous public registries and authenticated private registries. Before
-transfer, the source tag is resolved to a digest. The job persists that digest
-and all retries copy the same resolved source content.
+transfer, a tag-only source is resolved to a digest. Tag-plus-digest references
+are also supported: the digest is authoritative, the source tag is retained as
+metadata without being trusted for resolution, and both original strings remain
+in durable job metadata. All retries copy the same resolved source content by
+digest.
 
-Destination tags and digest-only destination references are supported. A digest
+Destination tags, digest-only references, and tag-plus-digest references are
+supported. For a combined destination, content is copied and verified by digest,
+then the retained tag is published and verified to resolve to that same digest. A digest
 in `destination` is itself explicit; no redundant opt-in flag is required. The
 wrapper validates engine and registry support before transfer and returns a
 stable unsupported-operation error rather than silently creating a tag or
 changing the requested reference.
 
 A tag changing after enqueue must not silently change the job's source. During
-planning, a mutable source tag is resolved and pinned to its root digest. All
-subsequent reads and retries use that digest rather than resolving the tag
-again. If the registry cannot serve the pinned graph consistently or required
-content changes or disappears, the job fails with the stable `source_changed`
-error. The copy preserves the source root manifest/index digest exactly by
+planning, a tag-only source is resolved and pinned to its root digest. A combined
+source is read directly by its supplied digest; its tag is descriptive and does
+not participate in content selection. All subsequent reads and retries use that
+digest rather than resolving the tag again. If the registry cannot serve the
+pinned graph consistently or required content changes or disappears, the job
+fails with an integrity or registry error. The copy preserves the source root
+manifest/index digest exactly by
 default. If the
 destination cannot accept the original manifest or media type without
 conversion, the job fails with a stable unsupported-operation error. Silent
